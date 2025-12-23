@@ -151,6 +151,7 @@ class Beam(pg.sprite.Sprite):
         self.rect.centery = bird.rect.centery+bird.rect.height*self.vy
         self.rect.centerx = bird.rect.centerx+bird.rect.width*self.vx
         self.speed = 10
+        self.attack = 1
 
     def update(self):
         self.rect.move_ip(self.speed*self.vx, self.speed*self.vy)
@@ -211,7 +212,7 @@ class Enemy(pg.sprite.Sprite):
     """
     imgs = [pg.image.load(f"fig/alien{i}.png") for i in range(1, 4)]
 
-    def __init__(self):
+    def __init__(self, level: int = 1):
         super().__init__()
         self.image = pg.transform.rotozoom(random.choice(__class__.imgs), 0, 0.8)
         self.rect = self.image.get_rect()
@@ -220,12 +221,50 @@ class Enemy(pg.sprite.Sprite):
         self.bound = random.randint(50, HEIGHT//2)
         self.state = "down"
         self.interval = random.randint(50, 300)
+        self.max_hp = 3 + level
+        self.hp = self.max_hp
+        self.state = "moving"
+        self.offset_frames = 0
+        self.ready_to_shoot = True
+        
 
     def update(self):
-        if self.rect.centery > self.bound:
-            self.vy = 0
-            self.state = "stop"
-        self.rect.move_ip(self.vx, self.vy)
+        if self.state == "moving":
+            self.rect.move_ip(self.vx, self.vy)
+            if self.rect.centery >= self.bound:
+                self.vy = 0
+                self.state = "stop"
+                self.ready_to_shoot = True
+
+        elif self.state == "stop":
+            # stop中に爆弾を落とすタイミングで state を "shoot" に変更
+            pass  # メインループで管理
+
+        elif self.state == "shoot":
+            # 爆弾を落としたら少し動く
+            self.offset_frames = 20  # 10フレームだけ下方向に動く
+            self.offset_vx = random.randint(-3, 3)
+            self.offset_vy = random.randint(-3, 3)
+            self.state = "offset"
+
+        elif self.state == "offset":
+            if self.offset_frames > 0:
+                self.rect.y += self.offset_vx  # 下に動く
+                self.rect.x += self.offset_vy
+                self.offset_frames -= 1
+            else:
+                self.state = "stop"  # 移動終了 → 再び止まる
+
+    def draw_hp(self, screen: pg.Surface):
+        bar_width = self.rect.width
+        bar_height = 5
+        hp_ratio = max(self.hp / self.max_hp, 0)
+        fill_width = int(bar_width * hp_ratio)
+        bg_rect = pg.Rect(self.rect.left, self.rect.top - bar_height - 2, bar_width, bar_height) 
+        pg.draw.rect(screen, (255, 0, 0), bg_rect) 
+        fg_rect = pg.Rect(self.rect.left, self.rect.top - bar_height - 2, fill_width, bar_height) 
+        pg.draw.rect(screen, (0, 255, 0), fg_rect)
+
 
 
 class Score:
@@ -319,6 +358,34 @@ class Gravity(pg.sprite.Sprite):
         if self.life <= 0:
             self.kill()
 
+class BossEnemy(Enemy):
+    def __init__(self, level: int = 5):  # 追加
+        super().__init__(level)  # 追加
+        self.image = pg.transform.rotozoom(random.choice(__class__.imgs), 0, 3.0)  # ボスは大きめ 追加
+        self.rect = self.image.get_rect()  # 追加
+        self.rect.center = WIDTH//2, 100  # 出現位置 追加
+        self.vx, self.vy = 3, 0  # 横移動のみ 追加
+        self.max_hp = 50 + level*10  # 高いHP 追加
+        self.hp = self.max_hp  # 追加
+        self.state = "alive"  # 追加
+
+    def update(self):  # 追加
+        # 横に揺れながら移動 追加
+        self.rect.x += self.vx  # 追加
+        if self.rect.right >= WIDTH or self.rect.left <= 0:  # 端で反転 追加
+            self.vx *= -1  # 追加
+
+    def draw_hp(self, screen: pg.Surface):  # 追加
+        # バーを大きく表示
+        bar_width = self.rect.width
+        bar_height = 15  # 追加: 高さを大きく
+        hp_ratio = max(self.hp / self.max_hp, 0)
+        fill_width = int(bar_width * hp_ratio)
+        bg_rect = pg.Rect(self.rect.left, self.rect.top - bar_height - 5, bar_width, bar_height)
+        pg.draw.rect(screen, (255, 0, 0), bg_rect)
+        fg_rect = pg.Rect(self.rect.left, self.rect.top - bar_height - 5, fill_width, bar_height)
+        pg.draw.rect(screen, (0, 255, 0), fg_rect)
+
 
 def main():
     pg.display.set_caption("真！こうかとん無双")
@@ -335,7 +402,7 @@ def main():
 
     gravities = pg.sprite.Group()
     shields = pg.sprite.Group()
-
+    boss_spawned = False
     tmr = 0
     clock = pg.time.Clock()
     while True:
@@ -366,17 +433,33 @@ def main():
                     shields.add(shield(bird, 400))
         screen.blit(bg_img, [0, 0])
 
-        if tmr % 200 == 0:
-            emys.add(Enemy())
+
+        if not boss_spawned and tmr % 200 == 0:
+            level = tmr // 1000 + 1
+            if level % 3 == 0:
+                boss = BossEnemy(level)  # 追加
+                emys = pg.sprite.Group() #ボス出現時に雑魚を消す
+                emys.add(boss)  # 追加
+                boss_spawned = True  # 追加
+            else:
+                emys.add(Enemy(level))
 
         for emy in emys:
             if emy.state == "stop" and tmr % emy.interval == 0:
                 bombs.add(Bomb(emy, bird))
+                emy.state = "shoot"
+                emy.ready_to_shoot = False
 
-        for emy in pg.sprite.groupcollide(emys, beams, True, True).keys():
-            exps.add(Explosion(emy, 100))
-            score.value += 10
-            bird.change_img(6, screen)
+        hits = pg.sprite.groupcollide(emys, beams, False, True)
+
+        for emy, hit_beams in hits.items():
+            for beam in hit_beams:
+                emy.hp -= beam.attack
+            if emy.hp <= 0:
+                exps.add(Explosion(emy, 100))
+                emy.kill()
+                score.value += 10
+                bird.change_img(6, screen)
 
         for bomb in pg.sprite.groupcollide(bombs, beams, True, True).keys():
             exps.add(Explosion(bomb, 50))
@@ -415,6 +498,11 @@ def main():
         beams.draw(screen)
         emys.update()
         emys.draw(screen)
+        for emy in emys:
+            emy.draw_hp(screen)
+            if emy.state == "stop" and tmr % emy.interval == 0:
+                bombs.add(Bomb(emy, bird))
+                emy.state = "shoot"  # 爆弾を出したら offset に遷移する準備
         bombs.update()
         bombs.draw(screen)
 
@@ -429,6 +517,9 @@ def main():
         score.update(screen)
         pg.display.update()
         tmr += 1
+
+        if boss_spawned and all(not isinstance(e, BossEnemy) for e in emys):
+            boss_spawned = False
         clock.tick(50)
 
 
