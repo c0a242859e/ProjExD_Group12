@@ -108,26 +108,26 @@ class Bomb(pg.sprite.Sprite):
     """
     colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255), (0, 255, 255)]
 
-    def __init__(self, emy: "Enemy", bird: Bird):
+    def __init__(self, emy: "Enemy", rad: int, speed: int, angle: int):
         """
         爆弾円Surfaceを生成する
         引数1 emy：爆弾を投下する敵機
         引数2 bird：攻撃対象のこうかとん
         """
         super().__init__()
-        rad = random.randint(10, 50)
         self.image = pg.Surface((2*rad, 2*rad))
         color = random.choice(__class__.colors)
         pg.draw.circle(self.image, color, (rad, rad), rad)
         self.image.set_colorkey((0, 0, 0))
         self.rect = self.image.get_rect()
-        self.vx, self.vy = calc_orientation(emy.rect, bird.rect)
         self.rect.centerx = emy.rect.centerx
         self.rect.centery = emy.rect.centery+emy.rect.height//2
-        self.speed = 6
+        radian = math.radians(angle)
+        self.vx = speed * math.cos(radian)
+        self.vy = -speed * math.sin(radian)
 
     def update(self):
-        self.rect.move_ip(self.speed*self.vx, self.speed*self.vy)
+        self.rect.move_ip(self.vx, self.vy)
         if check_bound(self.rect) != (True, True):
             self.kill()
 
@@ -143,7 +143,7 @@ class Beam(pg.sprite.Sprite):
         """
         super().__init__()
         self.vx, self.vy = bird.dire
-        angle = math.degrees(math.atan2(-self.vy, self.vx))
+        angle = 90 #常時上向きで攻撃
         self.image = pg.transform.rotozoom(pg.image.load(f"fig/beam.png"), angle + angle0, 1.0)
         self.vx = math.cos(math.radians(angle + angle0))
         self.vy = -math.sin(math.radians(angle + angle0))
@@ -151,6 +151,7 @@ class Beam(pg.sprite.Sprite):
         self.rect.centery = bird.rect.centery+bird.rect.height*self.vy
         self.rect.centerx = bird.rect.centerx+bird.rect.width*self.vx
         self.speed = 10
+        self.attack = 1
 
     def update(self):
         self.rect.move_ip(self.speed*self.vx, self.speed*self.vy)
@@ -185,7 +186,6 @@ class NeoBeam(pg.sprite.Sprite):
         return beams
 
 
-
 class Explosion(pg.sprite.Sprite):
     """
     爆発に関するクラス
@@ -211,7 +211,7 @@ class Enemy(pg.sprite.Sprite):
     """
     imgs = [pg.image.load(f"fig/alien{i}.png") for i in range(1, 4)]
 
-    def __init__(self):
+    def __init__(self, level: int = 1):
         super().__init__()
         self.image = pg.transform.rotozoom(random.choice(__class__.imgs), 0, 0.8)
         self.rect = self.image.get_rect()
@@ -219,13 +219,108 @@ class Enemy(pg.sprite.Sprite):
         self.vx, self.vy = 0, +6
         self.bound = random.randint(50, HEIGHT//2)
         self.state = "down"
-        self.interval = random.randint(50, 300)
+        self.interval = random.randint(50, 80)
+        self.max_hp = 3 + level
+        self.hp = self.max_hp
+        self.state = "moving"
+        self.offset_frames = 0
+        self.ready_to_shoot = True
+        
 
     def update(self):
-        if self.rect.centery > self.bound:
-            self.vy = 0
-            self.state = "stop"
-        self.rect.move_ip(self.vx, self.vy)
+        if self.state == "moving":
+            self.rect.move_ip(self.vx, self.vy)
+            if self.rect.centery >= self.bound:
+                self.vy = 0
+                self.state = "stop"
+                self.ready_to_shoot = True
+
+        elif self.state == "stop":
+            # stop中に爆弾を落とすタイミングで state を "shoot" に変更
+            pass  # メインループで管理
+
+        elif self.state == "shoot":
+            # 爆弾を落としたら少し動く
+            self.offset_frames = 20  # 10フレームだけ下方向に動く
+            self.offset_vx = random.randint(-3, 3)
+            self.offset_vy = random.randint(-3, 3)
+            self.state = "offset"
+
+        elif self.state == "offset":
+            if self.offset_frames > 0:
+                self.rect.y += self.offset_vx  # 下に動く
+                self.rect.x += self.offset_vy
+                self.offset_frames -= 1
+            else:
+                self.state = "stop"  # 移動終了 → 再び止まる
+
+    def draw_hp(self, screen: pg.Surface):
+        bar_width = self.rect.width
+        bar_height = 5
+        hp_ratio = max(self.hp / self.max_hp, 0)
+        fill_width = int(bar_width * hp_ratio)
+        bg_rect = pg.Rect(self.rect.left, self.rect.top - bar_height - 2, bar_width, bar_height) 
+        pg.draw.rect(screen, (255, 0, 0), bg_rect) 
+        fg_rect = pg.Rect(self.rect.left, self.rect.top - bar_height - 2, fill_width, bar_height) 
+        pg.draw.rect(screen, (0, 255, 0), fg_rect)
+
+
+
+class EnemyAttack(pg.sprite.Sprite):
+    """
+    敵の弾幕を設定するクラス
+    """
+    def __init__(self, enemy: Enemy, bird: Bird):
+        self.enemy = enemy
+        self.bird = bird
+
+    def kotei(self, rad: int, speed: int, num: int, angle_hani: int):
+        """
+        下向きに射撃
+        """
+        self.rad = rad
+        self.speed = speed
+        self.num = num
+        self.angle_hani = angle_hani
+        bombs = []
+        base_angle = 270  #下向き
+        if self.num == 1:
+            angle = base_angle
+            bomb = Bomb(self.enemy, rad, speed, angle)
+            bombs.append(bomb)
+        else:
+            start = -self.angle_hani // 2 #1発目の角度
+            step = self.angle_hani // (self.num - 1) #次の弾への角度補正
+            for i in range(self.num):
+                angle = base_angle + start + step * i
+                bomb = Bomb(self.enemy, self.rad, self.speed, angle)
+                bombs.append(bomb)
+        return bombs
+
+    def jiki(self, rad: int, speed: int, num: int, angle_hani: int):
+        """
+        自機狙い射撃
+        """
+        self.rad = rad
+        self.speed = speed
+        self.num = num
+        self.angle_hani = angle_hani
+        bombs = []
+        dx = self.bird.rect.centerx - self.enemy.rect.centerx
+        dy = self.enemy.rect.centery - self.bird.rect.centery
+        base_angle = math.degrees(math.atan2(dy, dx))
+        if self.num == 1:
+            angle = base_angle
+            bomb = Bomb(self.enemy, rad, speed, angle)
+            bombs.append(bomb)
+        else:
+            start = -self.angle_hani // 2
+            step = self.angle_hani // (self.num - 1)
+            for i in range(self.num):
+                angle = base_angle + start + step * i
+                bomb = Bomb(self.enemy, self.rad, self.speed, angle)
+                bombs.append(bomb)
+        return bombs
 
 
 class Score:
@@ -319,6 +414,34 @@ class Gravity(pg.sprite.Sprite):
         if self.life <= 0:
             self.kill()
 
+class BossEnemy(Enemy):
+    def __init__(self, level: int = 5):  # 追加
+        super().__init__(level)  # 追加
+        self.image = pg.transform.rotozoom(random.choice(__class__.imgs), 0, 3.0)  # ボスは大きめ 追加
+        self.rect = self.image.get_rect()  # 追加
+        self.rect.center = WIDTH//2, 100  # 出現位置 追加
+        self.vx, self.vy = 3, 0  # 横移動のみ 追加
+        self.max_hp = 50 + level*10  # 高いHP 追加
+        self.hp = self.max_hp  # 追加
+        self.state = "alive"  # 追加
+
+    def update(self):  # 追加
+        # 横に揺れながら移動 追加
+        self.rect.x += self.vx  # 追加
+        if self.rect.right >= WIDTH or self.rect.left <= 0:  # 端で反転 追加
+            self.vx *= -1  # 追加
+
+    def draw_hp(self, screen: pg.Surface):  # 追加
+        # バーを大きく表示
+        bar_width = self.rect.width
+        bar_height = 15  # 追加: 高さを大きく
+        hp_ratio = max(self.hp / self.max_hp, 0)
+        fill_width = int(bar_width * hp_ratio)
+        bg_rect = pg.Rect(self.rect.left, self.rect.top - bar_height - 5, bar_width, bar_height)
+        pg.draw.rect(screen, (255, 0, 0), bg_rect)
+        fg_rect = pg.Rect(self.rect.left, self.rect.top - bar_height - 5, fill_width, bar_height)
+        pg.draw.rect(screen, (0, 255, 0), fg_rect)
+
 
 def main():
     pg.display.set_caption("真！こうかとん無双")
@@ -335,23 +458,20 @@ def main():
 
     gravities = pg.sprite.Group()
     shields = pg.sprite.Group()
-
+    boss_spawned = False
     tmr = 0
     clock = pg.time.Clock()
+    shot_interval = 10
+    boss_spawned = False
     while True:
         key_lst = pg.key.get_pressed()
-
+        if key_lst[pg.K_SPACE] and tmr % shot_interval == 0: #spaceキー長押しで射撃
+            nb = NeoBeam(bird, 5)
+            dmk = nb.gen_beams()
+            beams.add(dmk)
         for event in pg.event.get():
             if event.type == pg.QUIT:
                 return 0
-            if event.type == pg.KEYDOWN and event.key == pg.K_SPACE:
-                if pg.key.get_pressed()[pg.K_LSHIFT]:
-                    nb = NeoBeam(bird, 5)
-                    dmk = nb.gen_beams()
-                    beams.add(dmk)
-                else:
-                    beams.add(Beam(bird))
-                beams.add(Beam(bird))
             if event.type == pg.KEYDOWN and event.key == pg.K_e:
                 if score.value >= 20 and len(emps) == 0:
                     score.value -= 20
@@ -366,21 +486,66 @@ def main():
                     shields.add(shield(bird, 400))
         screen.blit(bg_img, [0, 0])
 
-        if tmr % 200 == 0:
-            emys.add(Enemy())
+
+        if not boss_spawned and tmr % 200 == 0:
+            level = tmr // 1000 + 1
+            if level % 3 == 0:
+                boss = BossEnemy(level)  # 追加
+                emys = pg.sprite.Group() #ボス出現時に雑魚を消す
+                emys.add(boss)  # 追加
+                boss_spawned = True  # 追加
+            else:
+                emys.add(Enemy(level))
 
         for emy in emys:
             if emy.state == "stop" and tmr % emy.interval == 0:
-                bombs.add(Bomb(emy, bird))
+                attack = random.randint(0,100) #確率で射撃パターン変化
+                if attack<=20: #固定扇型・20%
+                    bombs.add(EnemyAttack(emy, bird).kotei(10, 5, 5, 60))
+                elif attack<=60: #自機狙い扇型・40%
+                    bombs.add(EnemyAttack(emy, bird).jiki(10, 5, 5, 60))
+                elif attack==80: #固定妨害・20%
+                    bombs.add(EnemyAttack(emy, bird).kotei(20, 2, 3, 90))
+                else: #自機狙い高速・20%
+                    bombs.add(EnemyAttack(emy, bird).jiki(10, 10, 1, 0))
+                emy.state = "shoot"
+                emy.ready_to_shoot = False
+            if boss_spawned is True:
+                if tmr % 300 == 0:
+                    attack = random.randint(0,100)
+                if attack is None or tmr % 300 >= 200:
+                    pass 
+                elif attack <= 25: #攻撃パターン1
+                    if tmr % 10 == 0:
+                        bombs.add(EnemyAttack(emy, bird).kotei(20, 5, 1, 0))
+                    if tmr % 50 == 0:
+                        bombs.add(EnemyAttack(emy, bird).jiki(10, 5, 5, 60))
+                elif attack <= 50: #攻撃パターン2
+                    if tmr % 8 == 0:
+                        bombs.add(EnemyAttack(emy, bird).jiki(10, 10, 1, 0))
+                    if tmr % 50 == 0:
+                        bombs.add(EnemyAttack(emy, bird).kotei(10, 5, 3, 30))
+                elif attack <= 75: #攻撃パターン3
+                    if tmr % 50 == 0:
+                        bombs.add(EnemyAttack(emy, bird).kotei(10, 5, 5, 60))
+                        bombs.add(EnemyAttack(emy, bird).kotei(10, 4, 4, 45))
+                    if tmr % 50 == 25:
+                        bombs.add(EnemyAttack(emy, bird).jiki(10, 5, 3, 30))
+                elif attack <= 100: #攻撃パターン4
+                    if tmr % 10 ==0:
+                        bombs.add(EnemyAttack(emy, bird).kotei(10, 5, 20, 360))
+            
 
-        for emy in pg.sprite.groupcollide(emys, beams, True, True).keys():
-            exps.add(Explosion(emy, 100))
-            score.value += 10
-            bird.change_img(6, screen)
+        hits = pg.sprite.groupcollide(emys, beams, False, True)
 
-        for bomb in pg.sprite.groupcollide(bombs, beams, True, True).keys():
-            exps.add(Explosion(bomb, 50))
-            score.value += 1
+        for emy, hit_beams in hits.items():
+            for beam in hit_beams:
+                emy.hp -= beam.attack
+            if emy.hp <= 0:
+                exps.add(Explosion(emy, 100))
+                emy.kill()
+                score.value += 10
+                bird.change_img(6, screen)
 
         for bomb in pg.sprite.spritecollide(bird, bombs, True):
             # EMPで無効化された爆弾ならゲームオーバーにしない
@@ -415,6 +580,11 @@ def main():
         beams.draw(screen)
         emys.update()
         emys.draw(screen)
+        for emy in emys:
+            emy.draw_hp(screen)
+            if emy.state == "stop" and tmr % emy.interval == 0:
+                bombs.add(Bomb(emy, bird))
+                emy.state = "shoot"  # 爆弾を出したら offset に遷移する準備
         bombs.update()
         bombs.draw(screen)
 
@@ -429,6 +599,9 @@ def main():
         score.update(screen)
         pg.display.update()
         tmr += 1
+
+        if boss_spawned and all(not isinstance(e, BossEnemy) for e in emys):
+            boss_spawned = False
         clock.tick(50)
 
 
